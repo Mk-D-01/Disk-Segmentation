@@ -1,0 +1,10 @@
+[package]
+name = "scanner-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ntfs = "0.4"
+nt-string = { version = "0.1", features = ["alloc"] }
+jwalk = "0.8"
+thiserror = "2"

@@ -1,0 +1,11 @@
+[package]
+name = "scanner-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "scanner-cli"
+path = "src/main.rs"
+
+[dependencies]
+scanner-core = { path = "../scanner-core" }

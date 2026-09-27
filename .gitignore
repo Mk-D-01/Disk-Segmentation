@@ -1,0 +1,14 @@
+# Rust toolchain relocated into the project (see README) — never commit it
+.toolchain/
+
+# Cargo build output
+target/
+**/target/
+
+# WPF / .NET build output (added when the UI project lands)
+bin/
+obj/
+
+# Editor/OS noise
+.vs/
+*.user

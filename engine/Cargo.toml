@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/scanner-core",
+    "crates/scanner-cli",
+]
+
+[profile.release]
+lto = true
+codegen-units = 1
