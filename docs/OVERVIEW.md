@@ -2,10 +2,11 @@
 
 ## What this is
 
-A Windows disk-usage analyzer, currently just the analysis engine (no UI yet).
-Given a path, it reports how much space each file and folder underneath it
-actually uses, using two different strategies so they can be measured against
-each other:
+A Windows disk-usage analyzer: a Rust scanning engine (`engine/`) plus a
+Tauri desktop app (`frontend/`) that lets a user pick a drive and see its
+folder-size breakdown. Given a path, the engine reports how much space each
+file and folder underneath it actually uses, using two different strategies
+so they can be measured against each other:
 
 1. **MFT engine** — reads the NTFS master file table (`$MFT`) directly off the
    raw volume.
@@ -20,16 +21,35 @@ subfolder — so their outputs are directly comparable.
 
 ## How it works, end to end
 
-### 1. Entry point (`scanner-cli`)
+### 0. The `ScanEngine` trait — one interface, two implementations
 
-`scanner-cli.exe <path> [--max-records N] [--children]` parses argv by hand
-(no CLI-parsing crate — three flags didn't justify one), splits `<path>` into
-a drive letter and a relative subpath (`volume::split_drive_and_subpath`),
-and dispatches to one of two code paths in `main.rs`:
+`scanner-core::engine` defines a `ScanEngine` trait (`scan`, `scan_children`,
+`requires_elevation`, `id`) plus two implementations: `MftEngine` and
+`WalkEngine`. Every caller — the CLI and the Tauri app — talks to engines
+only through this trait, holding them as `Box<dyn ScanEngine>` and looping
+generically rather than hand-writing one call site per engine. `MftEngine`
+and `WalkEngine` are thin adapters over `mft_scan`/`walk_scan`'s own richer,
+engine-specific result types, translating them into the shared
+`ScanReport`/`ChildEntry` shape (see `docs/LLD.md` for exact fields). Adding
+a third engine means adding a new type that implements the trait — no
+existing caller changes.
 
-- default: run both engines once, print one aggregate total each.
-- `--children`: run both engines' breakdown variant, print one row per
-  immediate subfolder, sorted by size descending.
+### 1. Entry points
+
+Two consumers sit on top of `scanner-core`, both only through `ScanEngine`:
+
+- **`scanner-cli`** — `scanner-cli.exe <path> [--max-records N]
+  [--children]`, argv parsed by hand (no CLI-parsing crate — three flags
+  didn't justify one). Builds a `Vec<Box<dyn ScanEngine>>` of both engines
+  and loops over it, printing either one aggregate total each (default) or
+  the per-immediate-subfolder breakdown (`--children`).
+- **`frontend` (Tauri app)** — a desktop window (`src-tauri`) exposing three
+  `#[tauri::command]`s (`list_drives`, `scan_summary`, `scan_children`) that
+  a plain HTML/CSS/JS UI (`ui/`) calls into. See §6 below.
+
+Neither consumer calls `mft_scan`/`walk_scan` directly — those modules are
+`pub` for internal reuse by `engine.rs`, but the crate's intended surface is
+`ScanEngine` and friends, re-exported at the crate root.
 
 ### 2. Opening the volume (`volume.rs`)
 
@@ -91,18 +111,54 @@ skipped rather than counted. `scan_walk_children` runs one such walk per
 immediate subdirectory of the target, so a system folder the process can't
 read into shows up as `0 bytes`, not an error.
 
+### 6. The frontend (`frontend/`)
+
+A Tauri v2 desktop app, split the same way the engine is: `src-tauri/`
+(Rust backend) and `ui/` (static HTML/CSS/JS — no npm, no bundler, no
+build step; `tauri.conf.json`'s `withGlobalTauri: true` exposes
+`window.__TAURI__.core.invoke` directly to plain `<script>` code).
+
+- `src-tauri/src/main.rs` registers three commands. `list_drives` calls a
+  small `drives` module (backed by the `sysinfo` crate) to enumerate mounted
+  volumes with their used/free space for the picker screen — deliberately
+  *not* part of `scanner-core`, since enumerating OS volumes is a desktop-app
+  concern the CLI has never needed (see that module's own doc comment for
+  the "move it once a second consumer needs it" reasoning). `scan_summary`
+  and `scan_children` each take a `path` and an `engine` id (`"mft"` or
+  `"walk"`), resolve it to a `Box<dyn ScanEngine>` via one match statement
+  (`engine_for`, the *only* place in the app that knows the two engines by
+  name), and call the trait method — errors are mapped to `String` for the
+  IPC boundary rather than needing `ScanError` to be serializable.
+- `ui/app.js` renders a drive-picker grid (`list_drives`), then a
+  per-folder breakdown table (`scan_children`, sorted by size — the
+  `ScanEngine` contract guarantees that ordering) for whichever drive is
+  clicked, with a summary strip from `scan_summary` above it. An `api`
+  object is the only thing in the UI code that knows it's talking to Tauri;
+  everything else works against plain JS values.
+- **The MFT engine option in the UI's engine picker will fail unless the
+  whole app is running elevated** — there is no in-app elevation prompt
+  yet, matching the CLI's own behavior. The walk engine (the UI's default)
+  needs no elevation.
+- **Deliberately not implemented**: any delete/cleanup action. The engine
+  has no deletion capability at all — this build reports sizes, it doesn't
+  free space. The UI says so directly (footer disclaimer) rather than
+  implying a capability that isn't there.
+
 ## Tech stack
 
 | Layer | Choice | Why |
 |---|---|---|
 | Language | Rust, 2021 edition, stable 1.98 | Predictable performance for a syscall-count-sensitive workload; no GC pause; `std::fs`/Win32 raw-handle access without an FFI layer. |
-| Build | Cargo workspace, 2 crates | `scanner-core` (library, the actual engines) is kept independent of `scanner-cli` (thin binary) so a future GUI frontend can depend on the same core without pulling in a CLI. |
+| Build | Two independent Cargo trees: `engine/` (workspace, 2 crates) and `frontend/src-tauri` (standalone crate with a path dependency on `../../engine/crates/scanner-core`) | `scanner-core` has no idea the frontend exists; the frontend depends *on* it, never the reverse. `scanner-cli` and the Tauri app are siblings, both consumers of the same library. |
 | NTFS parsing | [`ntfs`](https://crates.io/crates/ntfs) 0.4 | Does the low-level `$MFT` record/attribute/data-run parsing; this project only supplies the raw sector-aligned reader it needs and the aggregation logic on top. |
 | String handling | [`nt-string`](https://crates.io/crates/nt-string) 0.1 (`alloc` feature) | NTFS file names are UTF-16; required by `ntfs` for `NtfsFileName` decoding. |
 | Directory walk | [`jwalk`](https://crates.io/crates/jwalk) 0.8 | Multithreaded fallback walker (pulls in `rayon` transitively for its internal work-stealing pool — not used directly by this project's own code). |
 | Errors | [`thiserror`](https://crates.io/crates/thiserror) 2 | Derive-based error enum (`ScanError`) instead of hand-written `Display`/`Error` impls. |
-| Toolchain | Vendored under `.toolchain/` (`cargo`, `rustup`), not a system install | Keeps the build reproducible regardless of what's installed machine-wide; see `.gitignore` — never commit this directory. |
-| Frontend | Not started | `frontend/` currently holds only a stray `node_modules/` with no `package.json` or source — a placeholder, not a scaffold. |
+| Serialization | [`serde`](https://crates.io/crates/serde) 1 (`derive`) | `ScanReport`/`ChildEntry` need `Serialize` to cross the Tauri IPC boundary into JS; added to `scanner-core` itself rather than wrapped at the app layer, since it's a property of the data, not the transport. |
+| Desktop app shell | [`tauri`](https://crates.io/crates/tauri) 2 | Rust backend + OS-native WebView2 window; chosen specifically so the UI could depend on `scanner-core` directly instead of shelling out to `scanner-cli` and parsing text. |
+| Drive enumeration | [`sysinfo`](https://crates.io/crates/sysinfo) 0.32 | Lists mounted volumes with used/free space for the picker screen — lives in the Tauri app, not `scanner-core` (see §6). |
+| Frontend UI | Plain HTML/CSS/JS, no framework, no bundler | The previous attempt at a frontend left behind an npm `node_modules/` with no committed source (now removed) — this build deliberately has zero npm dependency. |
+| Toolchain | Vendored under `.toolchain/` (`cargo`, `rustup`), not a system install; target is `stable-x86_64-pc-windows-gnu` (MinGW, not MSVC) | Keeps the build reproducible regardless of what's installed machine-wide; see `.gitignore` — never commit this directory. The GNU target means Windows resource (icon) compilation goes through `windres`, not `rc.exe` — MinGW (e.g. an MSYS2 UCRT64 install) must be on `PATH` for `frontend/src-tauri` to build. |
 
 ## What's deliberately not here yet
 
@@ -110,5 +166,8 @@ read into shows up as `0 bytes`, not an error.
   The CLI's own output notes this is where the MFT engine's advantage grows
   once added.
 - No tests.
-- No UI. The `.gitignore` has a WPF/.NET section pre-staged, suggesting a
-  native Windows UI is the intended direction, but nothing has been built.
+- No delete/cleanup action anywhere, engine or UI — this is an analyzer,
+  not a cleaner, despite the project's name. See §6.
+- No in-app elevation request — the MFT engine option in the UI fails with
+  the same `Access is denied` the CLI shows unless the whole process was
+  launched elevated.

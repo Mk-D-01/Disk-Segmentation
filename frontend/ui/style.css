@@ -1,0 +1,255 @@
+:root {
+  --bg: #0f1115;
+  --panel: #171a21;
+  --panel-alt: #1d212a;
+  --border: #2a2f3a;
+  --text: #e6e8eb;
+  --text-dim: #9aa1ac;
+  --accent: #4f8cff;
+  --accent-dim: #2a4a86;
+  --danger: #e5484d;
+  --ok: #3ecf8e;
+  --radius: 8px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI", system-ui, sans-serif;
+  font-size: 14px;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+}
+
+.titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.titlebar h1 {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.engine-picker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+select,
+button {
+  background: var(--panel-alt);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+button:hover,
+select:hover {
+  border-color: var(--accent);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+main {
+  flex: 1;
+  overflow: hidden;
+  padding: 16px 20px;
+}
+
+.screen {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.screen.hidden {
+  display: none;
+}
+
+.screen-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.screen-toolbar h2 {
+  flex: 1;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-dim);
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drive-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+  overflow-y: auto;
+}
+
+.drive-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.drive-card:hover {
+  border-color: var(--accent);
+}
+
+.drive-card .letter {
+  font-size: 22px;
+  font-weight: 600;
+}
+
+.drive-card .fs {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.usage-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--panel-alt);
+  overflow: hidden;
+}
+
+.usage-bar > i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+
+.drive-card .sizes {
+  font-size: 12px;
+  color: var(--text-dim);
+  display: flex;
+  justify-content: space-between;
+}
+
+.results-summary {
+  display: flex;
+  gap: 20px;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.results-summary b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.status {
+  font-size: 13px;
+  color: var(--text-dim);
+  min-height: 1.4em;
+}
+
+.status.error {
+  color: var(--danger);
+}
+
+#results-table-wrap {
+  flex: 1;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+thead th {
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  text-align: left;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+}
+
+tbody td {
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+
+tbody tr:hover {
+  background: var(--panel-alt);
+}
+
+.name-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.kind-icon {
+  width: 14px;
+  text-align: center;
+  color: var(--text-dim);
+}
+
+.size-cell {
+  position: relative;
+}
+
+.size-bar {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background: var(--accent-dim);
+  z-index: 0;
+}
+
+.size-cell span {
+  position: relative;
+  z-index: 1;
+}
+
+.disclaimer {
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 6px;
+  border-top: 1px solid var(--border);
+}

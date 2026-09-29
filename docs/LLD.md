@@ -13,6 +13,7 @@ pub enum ScanError {
     Ntfs(#[from] ntfs::NtfsError),
     PathNotFound(PathBuf),
     NotNtfs(String),
+    InvalidTarget(String),             // target string isn't a path this engine can use (e.g. no drive letter, for MftEngine)
 }
 pub type Result<T> = std::result::Result<T, ScanError>;
 ```
@@ -263,12 +264,85 @@ pub fn scan_walk_children(path: &Path) -> WalkBreakdownReport;
   works on non-NTFS volumes and the only one safe to run unelevated, at the
   cost of the silent-skip behavior above.
 
+## `scanner-core::engine`
+
+```rust
+pub struct ScanTarget { pub path: String }
+impl ScanTarget { pub fn new(path: impl Into<String>) -> Self; }
+
+pub struct ScanReport {
+    pub elapsed_ms: u64, pub allocated_size: u64, pub logical_size: u64,
+    pub file_count: u64, pub dir_count: u64, pub note: Option<String>,
+} // #[derive(Serialize)] — crosses the Tauri IPC boundary as-is
+
+pub struct ChildEntry {
+    pub name: String, pub is_directory: bool,
+    pub allocated_size: u64, pub logical_size: u64,
+    pub file_count: u64, pub dir_count: u64,
+} // #[derive(Serialize)]
+
+pub struct ChildrenReport {
+    pub children: Vec<ChildEntry>,  // sorted by allocated_size, descending
+    pub note: Option<String>,       // same caveat mechanism as ScanReport::note
+} // #[derive(Serialize)]
+
+pub trait ScanEngine: Send + Sync {
+    fn id(&self) -> &'static str;
+    fn requires_elevation(&self) -> bool;
+    fn scan(&self, target: &ScanTarget) -> Result<ScanReport>;
+    fn scan_children(&self, target: &ScanTarget) -> Result<ChildrenReport>;
+}
+
+pub struct MftEngine { pub max_records: Option<u64> }   // id() == "mft",  requires_elevation() == true
+pub struct WalkEngine;                                   // id() == "walk", requires_elevation() == false
+```
+
+This module is the adapter layer between `mft_scan`/`walk_scan`'s own
+richer, differently-shaped report types and one common shape every caller
+can loop over.
+
+- `MftEngine::scan`/`scan_children` first call the private `split` helper
+  (`self.split(target)`), which wraps `volume::split_drive_and_subpath` and
+  turns a `None` into `Err(ScanError::InvalidTarget(target.path.clone()))`
+  — the one new error variant this refactor added. Note this moved
+  *out* of `scanner-cli` (which used to do this parse itself before even
+  calling into `scanner-core`) and *into* the engine — a real correctness
+  fix, not just a refactor: the old CLI code required every target to look
+  like a drive path even when only the walk engine would run, which the
+  walk engine never actually needed.
+- `MftEngine::scan` calls `mft_scan::scan_volume`, then maps
+  `records_walked < records_total` into `ScanReport::note` as a formatted
+  string (`"partial scan: X / Y MFT records walked (--max-records set)"`)
+  rather than a separate field — deliberately, so a caller that doesn't
+  care about MFT-specific diagnostics (the frontend, today) doesn't need to
+  know they exist; a caller that does can still read the note.
+  `MftEngine::scan_children` does the identical mapping into
+  `ChildrenReport::note` — the breakdown path carries the same caveat the
+  aggregate-total path does; this was the entire reason `ChildrenReport`
+  wraps `Vec<ChildEntry>` instead of `scan_children` returning the bare
+  `Vec` (an earlier version of this method did exactly that, and silently
+  dropped the partial-scan warning in `--children` mode — a real
+  regression that surfaced during doc review, not an intentional
+  simplification).
+- `WalkEngine::scan`/`scan_children` map `WalkScanReport::total_size` /
+  `WalkChildEntry::size` into **both** `allocated_size` and `logical_size`
+  on the shared type — the walk engine has no distinct allocated-size
+  reading (see `walk_scan` below), so both fields hold the identical
+  number. This is a documented modeling choice on the struct's own doc
+  comment, not a bug to fix later.
+- Neither engine struct holds any mutable state; both are cheap to
+  construct fresh per call (`MftEngine::new()`/`with_max_records(..)`,
+  `WalkEngine` is a unit struct). Callers are expected to build a fresh
+  `Box<dyn ScanEngine>` per request rather than caching one long-lived.
+
 ## `scanner-cli::main`
 
 ```rust
 fn main() -> ExitCode
-fn run_children_mode(drive: char, subpath: &str, target: &str, max_records: Option<u64>) -> ExitCode
-fn print_children_table<'a>(rows: impl Iterator<Item = (&'a str, bool, u64, u64, u64)>)
+fn engine_label(id: &str) -> &'static str
+fn print_report(report: &ScanReport)
+fn print_children_table(children: &[ChildEntry])
+fn print_comparison_note()
 ```
 
 - Argv parsing is manual, no crate: `args.get(1)` is the target path
@@ -277,22 +351,98 @@ fn print_children_table<'a>(rows: impl Iterator<Item = (&'a str, bool, u64, u64,
   `None`, i.e. "no cap", rather than an error — a deliberate leniency
   trade-off, not currently surfaced to the user); `--children` is a bare
   boolean flag (`args.iter().any(...)`).
-- `split_drive_and_subpath` failure prints a specific error and exits;
-  everything past this point assumes a valid `(drive, subpath)`.
-- Default mode prints the MFT report (or its `Err`, non-fatal to the
-  process — the walk section still runs after) then the walk report, plus
-  a fixed explanatory note about why the two numbers aren't a fair race
-  unless `<path>` is a drive root.
-- `--children` mode (`run_children_mode`) prints both engines' breakdown
-  reports through the shared `print_children_table` helper, which takes an
-  iterator of `(name, is_directory, size, file_count, dir_count)` tuples so
-  the two report types (`ChildSize` / `WalkChildEntry`, different field
-  names) can feed the same formatter via `.map(...)` at each call site. An
-  empty children list prints `(no entries)` rather than an empty table.
+- Builds `engines: Vec<Box<dyn ScanEngine>> = vec![Box::new(MftEngine::with_max_records(max_records)), Box::new(WalkEngine)]`
+  once, then loops over it — this loop is the concrete demonstration of
+  Open/Closed from `docs/HLD.md`'s "Design principles" section: a third
+  engine added to this `vec!` needs no other change here.
+- No upfront path validation — unlike before the `engine` refactor, `main`
+  no longer calls `split_drive_and_subpath` itself; each engine validates
+  the target when it actually tries to use it (see `engine::MftEngine`
+  above). `main` just prints the raw target string.
+- Default mode calls `engine.scan(&target)` per engine and prints via
+  `print_report` (which prints `report.note` first, if present, then
+  elapsed/counts/sizes), followed by `print_comparison_note`'s fixed
+  explanation of why the two numbers aren't a fair race unless `<path>` is
+  a drive root.
+- `--children` mode calls `engine.scan_children(&target)` per engine,
+  prints `report.note` first if present (same partial-scan caveat as
+  `scan`), then prints `report.children` via `print_children_table`, which
+  trusts the `ScanEngine` contract that the `Vec` is already sorted by
+  `allocated_size` descending (no re-sort). An empty list prints
+  `(no entries)`.
+- An engine's `Err` (e.g. the MFT engine unelevated) prints `FAILED: {e}`
+  and the loop continues to the next engine — not fatal to the process.
 - No output format other than `println!`/`eprintln!` text — no JSON, no
   exit-code differentiation between "MFT failed but walk succeeded" and
   "both succeeded" (both currently return `ExitCode::SUCCESS` as long as
   the process didn't panic).
+
+## `frontend/src-tauri::main` and `drives`
+
+```rust
+// main.rs
+fn engine_for(id: &str) -> Result<Box<dyn ScanEngine>, String>;   // "mft" | "walk" | _ => Err
+
+#[tauri::command] fn list_drives() -> Vec<DriveInfo>;
+#[tauri::command] fn scan_summary(path: String, engine: String) -> Result<ScanReport, String>;
+#[tauri::command] fn scan_children(path: String, engine: String) -> Result<ChildrenReport, String>;
+
+// drives.rs
+pub struct DriveInfo {
+    pub mount_point: String, pub total_bytes: u64, pub available_bytes: u64,
+    pub file_system: String, pub is_removable: bool,
+} // #[derive(Serialize)]
+pub fn list_drives() -> Vec<DriveInfo>;  // via sysinfo::Disks::new_with_refreshed_list(), sorted by mount_point
+```
+
+- `engine_for` is the **only** place in the app that matches on the two
+  engine ids by name — the same "one dispatch point" property `scanner-cli`
+  has via its `Vec<Box<dyn ScanEngine>>`, just shaped differently here
+  because the UI picks *one* engine per request rather than running both.
+- All three commands return `Result<_, String>`, not `Result<_, ScanError>`
+  — `ScanError` isn't `Serialize` (it wraps `std::io::Error`/`ntfs::NtfsError`,
+  neither of which are either), so the error is flattened to its `Display`
+  text (`.map_err(|e| e.to_string())`) at the command boundary. This loses
+  the ability to match on error *kind* in the UI (e.g. distinguish
+  "not elevated" from "path not found" programmatically) — today the UI
+  only ever displays the string, so this hasn't mattered yet.
+- `drives::list_drives` lives in the Tauri app, not `scanner-core` —
+  deliberately: enumerating OS volumes for a picker screen is a desktop-app
+  concern the CLI has never needed, and adding it to `scanner-core` before
+  a second consumer needed it would have been the same premature-generality
+  mistake the "Design principles" discussion in `docs/HLD.md` calls out for
+  the engine trait itself. It has no fallible path — `sysinfo` doesn't
+  return a `Result` for disk listing — so the command wraps it in `Ok(...)`
+  trivially rather than propagating an error that can't occur.
+- `list_drives` takes no target and can't fail; it's the only command that
+  isn't just "call a `ScanEngine` method."
+
+## `frontend/ui` (plain HTML/CSS/JS, no bundler)
+
+- `app.js` defines a single `api` object (`listDrives`/`scanSummary`/
+  `scanChildren`) wrapping `window.__TAURI__.core.invoke` — the *only*
+  place in the UI code that knows it's talking to Tauri specifically. Every
+  other function operates on plain JS values already shaped like the
+  Rust side's `Serialize` output (`camelCase` isn't needed since every
+  field name here happens to already be a single word or already
+  snake_case-compatible with JS property access).
+- Drive cards (`renderDriveCard`) and result rows (`renderChildRow`) are
+  pure render functions: given a `DriveInfo`/`ChildEntry` object, return a
+  DOM element. Clicking a drive card calls `openResults(mount_point)`,
+  which fires `scan_summary` and `scan_children` concurrently via
+  `Promise.allSettled` (not `Promise.all` — one succeeding and the other
+  failing is a real, expected case, e.g. the MFT engine failing unelevated
+  while the walk engine's own call for the same path would still succeed
+  if selected) and renders whichever settled.
+- The size bar in each result row (`renderChildRow`'s `size-bar` width) is
+  relative to the *largest* child's `allocated_size` in that same listing
+  (`maxSize`, recomputed per `openResults` call) — not relative to the
+  parent folder's total, so it visually ranks siblings against each other
+  rather than showing what fraction of the parent each one is.
+- `tauri.conf.json` sets `"withGlobalTauri": true` specifically so this
+  plain-script UI can reach `window.__TAURI__` with no npm package, no
+  bundler, and no build step — `frontendDist` points straight at `ui/` as
+  static files Tauri serves as-is.
 
 ## Known edge cases and their current handling
 
@@ -307,3 +457,4 @@ fn print_children_table<'a>(rows: impl Iterator<Item = (&'a str, bool, u64, u64,
 | Requested folder unreadable by walk engine (no permission) | Silently reported as `0 bytes` / no entries under it — not an error, not distinguishable from "genuinely empty" without independent knowledge. |
 | `--max-records` set below `records_total` | Both scan reports flag this explicitly (`records_walked < records_total`) and the CLI prints a `** PARTIAL **` warning; sizes/counts are real for the subset walked but not the whole answer. |
 | Malformed `--max-records` value | Parsed with `.and_then(|v| v.parse().ok())` — silently becomes "no cap" rather than erroring. |
+| Target string `MftEngine` can't parse a drive letter from (e.g. a bare UNC path) | `ScanError::InvalidTarget`, raised lazily inside `MftEngine::scan`/`scan_children` rather than upfront by the caller — `WalkEngine` never rejects such a target, since it doesn't need a drive letter at all. |

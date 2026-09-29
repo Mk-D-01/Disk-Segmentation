@@ -16,6 +16,9 @@ pub enum ScanError {
 
     #[error("volume does not look like NTFS (or record could not be parsed): {0}")]
     NotNtfs(String),
+
+    #[error("'{0}' is not a path this engine can scan")]
+    InvalidTarget(String),
 }
 
 pub type Result<T> = std::result::Result<T, ScanError>;

@@ -8,3 +8,4 @@ ntfs = "0.4"
 nt-string = { version = "0.1", features = ["alloc"] }
 jwalk = "0.8"
 thiserror = "2"
+serde = { version = "1", features = ["derive"] }

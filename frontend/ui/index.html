@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Disk Segmentation</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="titlebar">
+      <h1>Disk Segmentation</h1>
+      <label class="engine-picker">
+        Engine
+        <select id="engine-select">
+          <option value="walk" selected>Directory walk (no admin needed)</option>
+          <option value="mft">MFT scan (needs Administrator)</option>
+        </select>
+      </label>
+    </header>
+
+    <main>
+      <section id="drives-screen" class="screen">
+        <div class="screen-toolbar">
+          <h2>Select a drive to analyze</h2>
+          <button id="refresh-drives">Refresh</button>
+        </div>
+        <div id="drive-list" class="drive-list"></div>
+      </section>
+
+      <section id="results-screen" class="screen hidden">
+        <div class="screen-toolbar">
+          <button id="back-to-drives">&larr; Drives</button>
+          <h2 id="results-path"></h2>
+          <button id="rescan">Rescan</button>
+        </div>
+        <div id="results-summary" class="results-summary"></div>
+        <div id="results-status" class="status"></div>
+        <div id="results-table-wrap">
+          <table id="results-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Size</th>
+                <th>Files</th>
+                <th>Folders</th>
+              </tr>
+            </thead>
+            <tbody id="results-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <footer class="disclaimer">
+      Analysis only — this build reports sizes, it does not delete anything.
+    </footer>
+
+    <script src="app.js"></script>
+  </body>
+</html>
